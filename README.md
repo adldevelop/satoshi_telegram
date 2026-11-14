@@ -31,7 +31,7 @@ AGENT_CRIPTO2/
 │   └── tools/
 │       ├── get_market_data.py  # Captura preço e contexto de mercado BTCUSDT
 │       ├── get_fib_levels.py   # Calcula retrações de Fibonacci (4H, 300 candles)
-│       ├── sell_market.py      # Executa vendas parciais (1% a 40% do valor alavancado)
+│       ├── sell_market.py      # Executa vendas parciais (1% a 40% do BTC livre)
 │       ├── get_accounts_status.py # Retorna saldo, alavancagem e PnL
 │       └── __init__.py
 ├── logs/
@@ -129,7 +129,7 @@ Acesse no navegador:
 - 📊 Mostrar níveis de Fibonacci e zonas de entrada  
 - 💵 Exibir saldo e valor alavancado  
 - 📈 Calcular ROI e variação de 30 dias  
-- 💰 Executar **vendas parciais entre 1% e 40%** do valor alavancado (com confirmação)  
+- 💰 Executar **vendas parciais entre 1% e 40%** do saldo BTC livre (com confirmação explícita)
 - 🧠 Explicar o racional técnico da estratégia  
 
 ### O que o Satoshi **NÃO faz via chat**:
@@ -203,7 +203,7 @@ O agente Satoshi é projetado para operar **sem emoção**, **sem especulação*
 Ele segue uma conduta técnica e racional definida em `prompt.py`:
 
 - Não realiza compras manuais (apenas o módulo autônomo decide).  
-- Vendas limitadas entre **1% e 40%** do valor alavancado.  
+- Vendas limitadas entre **1% e 40%** do saldo BTC livre.
 - Sempre confirma antes de executar.  
 - Rejeita assuntos fora do contexto financeiro e cripto.  
 

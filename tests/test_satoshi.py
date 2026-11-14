@@ -98,18 +98,35 @@ def test_margin_performance_reuses_market_price(tmp_path, monkeypatch, mock_bina
     assert isinstance(result["roi_pct"], float)
 
 
+@pytest.mark.parametrize(
+    ("trading_mode", "order_response", "expected_status", "entry_expected"),
+    [
+        ("dry", None, "SIMULATED_BUY", True),
+        (
+            "real",
+            {"orderId": 123, "status": "FILLED", "executedQty": "0.01", "cummulativeQuoteQty": "1070"},
+            "ORDER_EXECUTED",
+            True,
+        ),
+        ("real", {"orderId": 124, "status": "REJECTED", "executedQty": "0"}, "ORDER_FAILED", False),
+    ],
+)
 @pytest.mark.asyncio
-async def test_cycle_reuses_account_response_and_simulates_entry(
+async def test_cycle_reuses_account_response_and_tracks_only_simulations_or_fills(
     tmp_path,
     monkeypatch,
     mock_binance_client,
+    trading_mode,
+    order_response,
+    expected_status,
+    entry_expected,
 ):
     import app.agent as agent_mod
 
     state = {"last_entry_cycle": None, "entries": [], "last_price": None}
     saved_states = []
     logged_cycles = []
-    monkeypatch.setattr(agent_mod, "TRADING_MODE", "dry")
+    monkeypatch.setattr(agent_mod, "TRADING_MODE", trading_mode)
     monkeypatch.setattr(agent_mod, "PNL_HISTORY_FILE", str(tmp_path / "pnl_history.json"))
     monkeypatch.setattr(agent_mod, "load_state", lambda: state)
     monkeypatch.setattr(agent_mod, "save_state", saved_states.append)
@@ -119,6 +136,7 @@ async def test_cycle_reuses_account_response_and_simulates_entry(
     monkeypatch.setattr(agent_mod, "ultima_zona_fibo", None)
     monkeypatch.setattr(agent_mod, "zona_executada", False)
     monkeypatch.setattr(agent_mod, "ultimo_preco", None)
+    mock_binance_client.create_margin_order.return_value = order_response
 
     async def cancel_after_cycle(_seconds):
         raise asyncio.CancelledError
@@ -129,7 +147,15 @@ async def test_cycle_reuses_account_response_and_simulates_entry(
         await monitorar_mercado(intervalo_segundos=1)
 
     mock_binance_client.get_margin_account.assert_called_once()
-    assert len(state["entries"]) == 1
-    assert state["entries"][0]["price"] == 107000.0
+    assert len(state["entries"]) == int(entry_expected)
+    if entry_expected:
+        expected_price = 1070 / 0.01 if trading_mode == "real" else 107000.0
+        assert state["entries"][0]["price"] == pytest.approx(expected_price)
     assert saved_states[0]["entries"] == state["entries"]
     assert logged_cycles[0][3] == "Análise determinística: preço 107000.00, zona [106563.60 — 107640.00]."
+    assert logged_cycles[0][4] == expected_status
+    if trading_mode == "real":
+        mock_binance_client.create_margin_order.assert_called_once()
+    else:
+        mock_binance_client.create_margin_order.assert_not_called()
+        assert logged_cycles[0][5]["quantity"] == pytest.approx(0.01869)

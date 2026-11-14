@@ -9,15 +9,13 @@ import hashlib
 import requests
 from urllib.parse import urlencode
 from decimal import Decimal, ROUND_DOWN, getcontext
-from dotenv import load_dotenv
+from ..config import get_buy_percent, get_trading_mode
 
 
 
 # ============================================================
 # ⚙️ Inicialização e Configurações
 # ============================================================
-
-load_dotenv()
 
 BNB_API_KEY = os.getenv("BNB_API_KEY")
 BNB_API_SECRET = os.getenv("BNB_API_SECRET")
@@ -93,6 +91,10 @@ def get_margin_account_balance(asset: str = "USDT") -> float | None:
 
 def create_margin_order(symbol: str, side: str, quantity: float, order_type="MARKET"):
     """Executa uma ordem de margem (MARGIN_BUY) na Binance."""
+    if get_trading_mode() != "real":
+        return None
+    if not BNB_API_KEY or not BNB_API_SECRET:
+        return None
     endpoint = "/sapi/v1/margin/order"
     params = {
         "symbol": symbol,
@@ -121,23 +123,35 @@ def create_margin_order(symbol: str, side: str, quantity: float, order_type="MAR
 # ============================================================
 
 
-def create_order_tool(symbol: str = "BTCUSDT", leverage: int = 5, percent_capital: float = 0.6):
+def create_order_tool(
+    symbol: str = "BTCUSDT",
+    leverage: int = 5,
+    percent_capital: float | None = None,
+):
     """
     Cria uma ordem de compra (MARGIN_BUY) de BTC na Binance com base no saldo atual disponível.
 
     O agente calcula automaticamente:
     - O saldo livre de USDT na conta de margem.
-    - O valor de entrada equivalente a 60% desse saldo.
+    - O valor de entrada definido por BUY_PERCENT (ou percent_capital explícito).
     - A quantidade proporcional de BTC considerando alavancagem de 5x.
 
     Args:
         symbol (str): Par de negociação (ex: "BTCUSDT").
         leverage (int): Multiplicador de alavancagem (default = 5).
-        percent_capital (float): Porcentagem do saldo disponível a ser utilizada (default = 0.6 = 60%).
+        percent_capital (float): Fração do saldo disponível a ser utilizada (0 < valor <= 1).
 
     Returns:
         dict: Dados estruturados da operação (preço, quantidade, capital usado, status).
     """
+
+    try:
+        trading_mode = get_trading_mode()
+    except ValueError as exc:
+        return {"status": "ERROR", "message": str(exc)}
+
+    if not isinstance(leverage, int) or leverage <= 0:
+        return {"status": "ERROR", "message": "leverage deve ser um inteiro positivo."}
 
     # 🔐 Validação de credenciais
     if not BNB_API_KEY or not BNB_API_SECRET:
@@ -148,7 +162,12 @@ def create_order_tool(symbol: str = "BTCUSDT", leverage: int = 5, percent_capita
     if balance_usdt is None or balance_usdt <= 0:
         return {"status": "ERROR", "message": "Não foi possível obter saldo de USDT ou saldo insuficiente."}
 
-    # 💵 Cálculo do valor de entrada (60% do saldo)
+    # 💵 Cálculo do valor de entrada
+    if percent_capital is None:
+        percent_capital = get_buy_percent()
+    if not 0 < percent_capital <= 1:
+        return {"status": "ERROR", "message": "percent_capital deve estar entre 0 e 1."}
+
     capital_to_use = balance_usdt * percent_capital
     print(f"[📊] Capital total em USDT: {balance_usdt} | Usando {percent_capital*100:.0f}% = {capital_to_use:.2f} USDT")
 
@@ -178,14 +197,27 @@ def create_order_tool(symbol: str = "BTCUSDT", leverage: int = 5, percent_capita
     print(f"[⚙️] Executando ordem BUY para {symbol}")
     print(f"Preço atual: {current_price} | Quantidade: {quantity} | Alavancagem: {leverage}x")
 
+    if trading_mode == "dry":
+        return {
+            "status": "SIMULATED",
+            "symbol": symbol,
+            "price": current_price,
+            "quantity": quantity,
+            "leverage": leverage,
+            "capital_used_usdt": round(capital_to_use, 2),
+            "mode": "DRY_RUN",
+        }
+
     # 🚀 Execução da ordem
     order_response = create_margin_order(symbol, "BUY", quantity)
-    if order_response:
+    executed_qty = float(order_response.get("executedQty", 0)) if isinstance(order_response, dict) else 0
+    order_status = order_response.get("status") if isinstance(order_response, dict) else None
+    if order_status in {"PARTIALLY_FILLED", "FILLED"} and executed_qty > 0:
         return {
             "status": "ORDER_EXECUTED",
             "symbol": symbol,
             "price": current_price,
-            "quantity": quantity,
+            "quantity": executed_qty,
             "leverage": leverage,
             "capital_used_usdt": round(capital_to_use, 2),
             "timestamp": int(time.time()),

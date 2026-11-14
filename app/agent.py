@@ -6,12 +6,10 @@ import asyncio
 import os
 import time
 import json
+from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
-
-load_dotenv()
-
+from .config import get_buy_percent, get_trading_mode
 from .tools.get_market_data import get_market_data
 from binance.client import Client
 import requests
@@ -22,7 +20,7 @@ import requests
 
 BNB_API_KEY = os.getenv("BNB_API_KEY")
 BNB_API_SECRET = os.getenv("BNB_API_SECRET")
-TRADING_MODE = os.getenv("TRADING_MODE", "dry").lower().strip()  # dry | real
+TRADING_MODE = get_trading_mode()
 COOLDOWN_CYCLES = int(os.getenv("COOLDOWN_CYCLES", "180")) #180
 USE_REASONING = os.getenv("USE_REASONING", "off").lower().strip() == "on"
 GENAI_API_KEY = os.getenv("GEMINI_API_KEY")
@@ -43,7 +41,7 @@ LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 #===============================================================
 #                     BUY PERCENT CONFIG
 #===============================================================
-BUY_PERCENT = float(os.getenv("BUY_PERCENT", "0.4"))  # 0.4 = 40%
+BUY_PERCENT = get_buy_percent()
 LEVERAGE = int(os.getenv("LEVERAGE", "5"))
 
 # 🔔 Percentual mínimo de movimento para enviar alerta (ex: 0.5 = 0.5%)
@@ -288,6 +286,18 @@ def calcular_preco_medio(entries: List[Dict[str, Any]]) -> Optional[float]:
     soma = sum(e["price"] for e in entries)
     return round(soma / len(entries), 2)
 
+
+def calcular_quantidade_compra(
+    saldo_usdt: float,
+    preco: float,
+    percentual: float,
+    alavancagem: int,
+) -> float:
+    if preco <= 0 or saldo_usdt <= 0:
+        return 0.0
+    quantidade = (saldo_usdt * percentual * alavancagem) / preco
+    return float(Decimal(str(quantidade)).quantize(Decimal("0.00001"), rounding=ROUND_DOWN))
+
 # ==============================================================
 # 📊 Fibonacci (4H, 180 candles)
 # ==============================================================
@@ -525,10 +535,22 @@ async def monitorar_mercado(intervalo_segundos=120):
 
             if not cooldown_active and (zona_min <= preco_atual <= zona_max) and not zona_executada:
                 print("🚨 Zona 0.382 atingida — executando ordem MARGIN (5x)...")
+                free_usdt = balances["USDT_free"] if balances else 0
+                qty = calcular_quantidade_compra(
+                    free_usdt or 0,
+                    preco_atual,
+                    BUY_PERCENT,
+                    LEVERAGE,
+                )
 
-                if TRADING_MODE == "dry":
-                    valor_usdt = (balances["USDT_free"] or 0) * BUY_PERCENT * LEVERAGE
-                    qty = round(valor_usdt / preco_atual, 5) if preco_atual > 0 else 0
+                if qty <= 0 or qty * preco_atual < 10:
+                    ciclo_status = "ORDER_REJECTED"
+                    extra_payload = {
+                        "reason": "Calculated order quantity is below the exchange minimum.",
+                        "quantity": qty,
+                        "notional_usdt": qty * preco_atual,
+                    }
+                elif TRADING_MODE == "dry":
                     payload = {
                         "symbol": "BTCUSDT",
                         "side": "BUY",
@@ -551,9 +573,15 @@ async def monitorar_mercado(intervalo_segundos=120):
                         f"Ciclo: {ciclo}\n"
                         f"Zona: 0.382 ({zona_min:.2f}–{zona_max:.2f})"
                     )
+                    entries.append({
+                        "cycle": ciclo,
+                        "price": preco_atual,
+                        "timestamp": datetime.now().isoformat(),
+                        "mode": "DRY_RUN",
+                    })
+                    zona_executada = True
+                    last_entry_cycle = ciclo
                 else:
-                    valor_usdt = (balances["USDT_free"] or 0) * 0.6 * LEVERAGE
-                    qty = round(valor_usdt / preco_atual, 5)
                     response = client.create_margin_order(
                         symbol="BTCUSDT",
                         side="BUY",
@@ -561,26 +589,34 @@ async def monitorar_mercado(intervalo_segundos=120):
                         quantity=qty,
                         sideEffectType="MARGIN_BUY",
                     )
-                    ciclo_status = "ORDER_EXECUTED"
-                    extra_payload = {"response": response, "executed_qty": qty}
+                    executed_qty = float(response.get("executedQty", 0)) if isinstance(response, dict) else 0
+                    quote_qty = float(response.get("cummulativeQuoteQty", 0)) if isinstance(response, dict) else 0
+                    order_status = response.get("status") if isinstance(response, dict) else None
+                    ciclo_status = "ORDER_EXECUTED" if order_status in {"PARTIALLY_FILLED", "FILLED"} and executed_qty > 0 else "ORDER_FAILED"
+                    extra_payload = {
+                        "response": response,
+                        "requested_qty": qty,
+                        "executed_qty": executed_qty,
+                    }
 
-                    # 🔔 Notificação REAL
-                    send_telegram_message(
-                        f"✅ COMPRA EXECUTADA BTCUSDT\n"
-                        f"Preço approx: {preco_atual:.2f} USDT\n"
-                        f"Qtd: {qty}\n"
-                        f"Leverage: {LEVERAGE}x\n"
-                        f"Ciclo: {ciclo}\n"
-                        f"Modo: REAL"
-                    )
-
-                zona_executada = True
-                last_entry_cycle = ciclo
-                entries.append({
-                    "cycle": ciclo,
-                    "price": preco_atual,
-                    "timestamp": datetime.now().isoformat()
-                })
+                    if ciclo_status == "ORDER_EXECUTED":
+                        fill_price = quote_qty / executed_qty if quote_qty > 0 else preco_atual
+                        entries.append({
+                            "cycle": ciclo,
+                            "price": fill_price,
+                            "quantity": executed_qty,
+                            "timestamp": datetime.now().isoformat(),
+                        })
+                        zona_executada = True
+                        last_entry_cycle = ciclo
+                        send_telegram_message(
+                            f"✅ COMPRA EXECUTADA BTCUSDT\n"
+                            f"Preço médio: {fill_price:.2f} USDT\n"
+                            f"Qtd executada: {executed_qty}\n"
+                            f"Leverage: {LEVERAGE}x\n"
+                            f"Ciclo: {ciclo}\n"
+                            f"Modo: REAL"
+                        )
 
             # log e persistência de estado (com last_price)
             salvar_log(
