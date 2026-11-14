@@ -9,10 +9,10 @@ import os
 # Requer chave pública e privada no .env
 BNB_API_KEY = os.getenv("BNB_API_KEY")
 BNB_API_SECRET = os.getenv("BNB_API_SECRET")
+client = Client(BNB_API_KEY, BNB_API_SECRET)
 
 def get_market_data(symbol: str) -> dict:
     try:
-        client = Client(BNB_API_KEY, BNB_API_SECRET)
         ticker = client.get_ticker(symbol=symbol)
         return {
             "symbol": symbol,

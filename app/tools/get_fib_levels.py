@@ -5,7 +5,6 @@ from typing import Dict, Any
 
 from dotenv import load_dotenv
 from binance.client import Client
-from google.adk.tools.function_tool import FunctionTool
 
 # ==========================================================
 # ⚙️ Configuração Inicial
@@ -85,10 +84,3 @@ def get_fib_levels(symbol: str) -> Dict[str, Any]:
         tb = traceback.format_exc()
         print("❌ ERRO em get_fib_levels():", tb)
         return {"ok": False, "error": f"{type(e).__name__}: {str(e)}"}
-
-
-
-# ==========================================================
-# 🔹 Registro compatível do Tool no ADK (sem name/desc)
-# ==========================================================
-get_fib_levels_tool = FunctionTool(get_fib_levels)

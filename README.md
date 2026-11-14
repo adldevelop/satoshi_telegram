@@ -69,7 +69,11 @@ BUY_PERCENT=0.4               # 40% do saldo em USDT
 LEVERAGE=5                    # Alavancagem padrão
 USE_REASONING=on
 GOOGLE_API_KEY=SEU_API_KEY_GEMINI
+LOG_MAX_BYTES=5242880       # Rotação do log principal em 5 MiB
+LOG_BACKUP_COUNT=3          # Mantém até 3 arquivos rotacionados
 ```
+
+O loop autônomo não carrega o ADK conversacional. Em uma VM com 1 GB de RAM, mantenha apenas os serviços necessários em execução e não inicie o PostgreSQL se a aplicação não estiver usando-o. O log JSONL é rotacionado por tamanho; os arquivos `state.json` e `pnl_history.json` permanecem no diretório `logs/` local.
 
 ---
 

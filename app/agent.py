@@ -9,20 +9,16 @@ import json
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from dotenv import load_dotenv
-from google.adk.agents import Agent
-from .prompt import ROOT_AGENT_PROMPT
-from .tools.get_fib_levels import get_fib_levels
+
+load_dotenv()
+
 from .tools.get_market_data import get_market_data
-from .tools.sell_market import sell_market_tool
-from .tools.get_accounts_status import get_account_status_tool
 from binance.client import Client
 import requests
 
 # ==============================================================
 # ⚙️ Configurações iniciais
 # ==============================================================
-
-load_dotenv()
 
 BNB_API_KEY = os.getenv("BNB_API_KEY")
 BNB_API_SECRET = os.getenv("BNB_API_SECRET")
@@ -41,6 +37,8 @@ LOG_DIR = "logs"
 LOG_FILE = os.path.join(LOG_DIR, "satoshi_log.jsonl")
 STATE_FILE = os.path.join(LOG_DIR, "state.json")
 PNL_HISTORY_FILE = os.path.join(LOG_DIR, "pnl_history.json")
+LOG_MAX_BYTES = int(os.getenv("LOG_MAX_BYTES", str(5 * 1024 * 1024)))
+LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 
 #===============================================================
 #                     BUY PERCENT CONFIG
@@ -72,18 +70,6 @@ def send_telegram_message(text: str) -> None:
         print(f"[⚠️] Erro ao enviar mensagem Telegram: {e}")
 
 # ==============================================================
-# 🧠 Definição do agente ADK
-# ==============================================================
-
-satoshi_agent = Agent(
-    name="satoshi",
-    model="gemini-2.0-flash",
-    description="Agente autônomo para trading MARGIN BTC com base em retrações de Fibonacci e alavancagem 5x.",
-    instruction=ROOT_AGENT_PROMPT,
-    tools=[get_fib_levels, get_market_data, sell_market_tool, get_account_status_tool],
-)
-
-
 # ==============================================================
 # 🗃️ Estado persistente (cooldown + histórico)
 # ==============================================================
@@ -111,6 +97,26 @@ def save_state(state: Dict[str, Any]) -> None:
         json.dump(state, f, ensure_ascii=False, indent=2)
     os.replace(tmp, STATE_FILE)
 
+
+def _rotate_log_file(path: str, max_bytes: int, backup_count: int) -> None:
+    if max_bytes <= 0 or not os.path.exists(path) or os.path.getsize(path) < max_bytes:
+        return
+
+    if backup_count <= 0:
+        os.remove(path)
+        return
+
+    oldest_backup = f"{path}.{backup_count}"
+    if os.path.exists(oldest_backup):
+        os.remove(oldest_backup)
+
+    for backup_index in range(backup_count - 1, 0, -1):
+        source = f"{path}.{backup_index}"
+        if os.path.exists(source):
+            os.replace(source, f"{path}.{backup_index + 1}")
+
+    os.replace(path, f"{path}.1")
+
 # ==============================================================
 # 📁 Logger estruturado
 # ==============================================================
@@ -133,6 +139,7 @@ def salvar_log(ciclo, fibo_data, balances, analise, status, extra=None, entries=
     if entries is not None:
         registro["entries_count"] = len(entries)
         registro["entries_prices"] = [e.get("price") for e in entries if "price" in e]
+    _rotate_log_file(LOG_FILE, LOG_MAX_BYTES, LOG_BACKUP_COUNT)
     with open(LOG_FILE, "a", encoding="utf-8") as f:
         f.write(json.dumps(registro, ensure_ascii=False) + "\n")
 
@@ -140,10 +147,10 @@ def salvar_log(ciclo, fibo_data, balances, analise, status, extra=None, entries=
 # 💰 Saldos MARGIN Cross (BTC e USDT)
 # ==============================================================
 
-def get_balances_margin() -> Optional[Dict[str, Any]]:
+def get_balances_margin(account_data: Optional[Dict[str, Any]] = None) -> Optional[Dict[str, Any]]:
     """Lê saldos MARGIN Cross (BTC e USDT)."""
     try:
-        account = client.get_margin_account()
+        account = account_data if account_data is not None else client.get_margin_account()
         assets = {a["asset"]: a for a in account["userAssets"]}
         btc, usdt = assets.get("BTC"), assets.get("USDT")
 
@@ -224,10 +231,15 @@ def get_btc_prices_usd_brl() -> Dict[str, float]:
     return {"usd": usd, "brl": brl}
 
 
-def get_margin_performance_30d(account_data: dict) -> Dict[str, Any]:
+def get_margin_performance_30d(
+    account_data: dict,
+    btc_price: Optional[float] = None,
+) -> Dict[str, Any]:
     """Calcula performance dos últimos 30 dias (PnL, variação percentual e ROI)."""
     try:
-        collateral_value = float(account_data.get("totalNetAssetOfBtc", 0)) * get_btc_price()
+        if btc_price is None:
+            btc_price = get_btc_price()
+        collateral_value = float(account_data.get("totalNetAssetOfBtc", 0)) * btc_price
         now = datetime.utcnow()
         past_threshold = now - timedelta(days=30)
         history = []
@@ -424,9 +436,9 @@ async def monitorar_mercado(intervalo_segundos=120):
             print(f"[🔢] Nível 0.382: {fibo_382:.2f} (zona: {zona_min:.2f} — {zona_max:.2f})")
             print(f"[📊] Estado: {'✅ Já executada' if zona_executada else '🟢 Aguardando entrada'}")
 
-            balances = get_balances_margin()
             account_data = client.get_margin_account()
-            perf_data = get_margin_performance_30d(account_data)
+            balances = get_balances_margin(account_data)
+            perf_data = get_margin_performance_30d(account_data, preco_atual)
             preco_medio = calcular_preco_medio(entries)
 
             print(
@@ -437,7 +449,7 @@ async def monitorar_mercado(intervalo_segundos=120):
 
             # 💠 Total alavancado
             try:
-                total_alavancado = float(account_data.get("totalAssetOfBtc", 0)) * get_btc_price()
+                total_alavancado = float(account_data.get("totalAssetOfBtc", 0)) * preco_atual
                 print(f"[💠] Total alavancado: ${total_alavancado:.2f}")
             except Exception as e:
                 total_alavancado = None
