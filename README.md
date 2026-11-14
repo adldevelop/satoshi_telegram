@@ -198,6 +198,8 @@ Os testes validam:
 
 A revisão é gerada uma vez por dia pelo próprio loop do agente e envia um resumo pelo Telegram quando configurado. Ela separa registros `dry` e `real`, não altera parâmetros, e não trata MFE/MAE como lucro realizado; custos, regras de saída e backtest continuam necessários para avaliar rentabilidade.
 
+No modo `dry`, o agente mantém no máximo uma posição paper e simula stop-loss percentual e take-profit. Configure `PAPER_STOP_LOSS_PCT`, `PAPER_RISK_REWARD` e, opcionalmente, `PAPER_TAKE_PROFIT_PCT`; se o alvo explícito ficar vazio, ele será calculado pela relação risco/retorno. `PAPER_FEE_PCT` e `PAPER_SLIPPAGE_PCT` são aplicados na entrada e na saída simuladas. A saída é avaliada nos preços consultados pelo loop (a cada 120 segundos por padrão), então um movimento que atravesse o stop e volte entre ciclos pode não ser observado. Esses valores são hipóteses para avaliação, não recomendação financeira; gaps podem produzir uma saída pior que o preço teórico do stop. Essa gestão paper não envia vendas reais nem adiciona stop-loss ao modo `real`.
+
 ---
 
 ## ⚖️ Conduta e Ética Operacional

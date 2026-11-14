@@ -92,3 +92,29 @@ def test_daily_review_writes_once_per_date_and_notifies(tmp_path):
     assert json.loads(state_path.read_text(encoding="utf-8"))["last_review_date"] == "2026-01-10"
     assert len(messages) == 1
     assert "revisão diária dry-run" in messages[0]
+
+
+def test_review_aggregates_only_closed_paper_trade_results():
+    now = datetime(2026, 1, 10, 12)
+    rows = [
+        _row(now - timedelta(hours=2), status="PAPER_EXIT"),
+        _row(now - timedelta(hours=1), mode="real", status="PAPER_EXIT"),
+    ]
+    rows[0]["extra"] = {
+        "paper_trade": {
+            "net_pnl": -2.5,
+            "max_favorable_excursion_pct": 1.5,
+            "max_adverse_excursion_pct": -2.1,
+        }
+    }
+    rows[1]["extra"] = {"paper_trade": {"net_pnl": 99.0}}
+    for row in rows:
+        row["_parsed_at"] = datetime.fromisoformat(row["timestamp"])
+
+    review = build_review(rows, current_mode="dry", now=now)
+
+    assert review["last_24h"]["paper_closed_trades"] == 1
+    assert review["last_24h"]["paper_net_pnl"] == -2.5
+    assert review["last_24h"]["paper_losses"] == 1
+    assert review["last_24h"]["paper_avg_mfe_pct"] == 1.5
+    assert review["last_24h"]["paper_avg_mae_pct"] == -2.1

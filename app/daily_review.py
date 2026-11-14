@@ -92,6 +92,26 @@ def _window_summary(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
     dry_rows = [row for row in selected if row.get("mode") == "dry"]
     dry_errors = [row for row in dry_rows if row.get("status") == "ERROR"]
     categories = Counter(_error_category(row) for row in dry_errors)
+    paper_trades = [
+        (row.get("extra") or {}).get("paper_trade")
+        for row in dry_rows
+        if row.get("status") == "PAPER_EXIT" and isinstance(row.get("extra"), dict)
+    ]
+    paper_pnls = [
+        float(trade["net_pnl"])
+        for trade in paper_trades
+        if isinstance(trade, dict) and isinstance(trade.get("net_pnl"), (int, float))
+    ]
+    paper_mfe = [
+        float(trade["max_favorable_excursion_pct"])
+        for trade in paper_trades
+        if isinstance(trade, dict) and isinstance(trade.get("max_favorable_excursion_pct"), (int, float))
+    ]
+    paper_mae = [
+        float(trade["max_adverse_excursion_pct"])
+        for trade in paper_trades
+        if isinstance(trade, dict) and isinstance(trade.get("max_adverse_excursion_pct"), (int, float))
+    ]
     return {
         "rows": len(selected),
         "modes": dict(modes),
@@ -100,6 +120,12 @@ def _window_summary(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         "dry_errors": len(dry_errors),
         "dry_error_categories": dict(categories),
         "dry_entries": sum(row.get("status") == "SIMULATED_BUY" for row in dry_rows),
+        "paper_closed_trades": len(paper_pnls),
+        "paper_net_pnl": sum(paper_pnls),
+        "paper_wins": sum(pnl > 0 for pnl in paper_pnls),
+        "paper_losses": sum(pnl < 0 for pnl in paper_pnls),
+        "paper_avg_mfe_pct": sum(paper_mfe) / len(paper_mfe) if paper_mfe else None,
+        "paper_avg_mae_pct": sum(paper_mae) / len(paper_mae) if paper_mae else None,
     }
 
 
@@ -219,6 +245,8 @@ def render_report(review: Dict[str, Any]) -> str:
         f"Modo atual: **{review['current_mode']}**",
         f"Últimas 24h: {day['dry_cycles']} ciclos dry, {day['dry_entries']} entrada(s) simulada(s), {day['dry_errors']} erro(s).",
         f"Últimos 7 dias: {week['dry_cycles']} ciclos dry, {week['dry_entries']} entrada(s) simulada(s), {week['dry_errors']} erro(s).",
+        f"Saídas paper em 7d: {week['paper_closed_trades']}, resultado líquido simulado {week['paper_net_pnl']:.4f} USDT (antes de juros/custos não modelados).",
+        f"MFE/MAE médios das saídas paper em 7d: {week['paper_avg_mfe_pct'] if week['paper_avg_mfe_pct'] is not None else 'n/d'}% / {week['paper_avg_mae_pct'] if week['paper_avg_mae_pct'] is not None else 'n/d'}%.",
         f"Categorias de erro nas últimas 24h: {errors}.",
         f"Acompanhamento hipotético de entradas dry: {mark_to_market}.",
         f"Preços dry estruturados nos últimos 7 dias: {review['dry_price_rows_7d']}.",
@@ -242,6 +270,8 @@ def telegram_summary(review: Dict[str, Any]) -> str:
         "Satoshi: revisão diária dry-run\n"
         f"24h: {day['dry_cycles']} ciclos, {day['dry_entries']} entradas simuladas, {day['dry_errors']} erros.\n"
         f"7d: {week['dry_cycles']} ciclos, {week['dry_entries']} entradas simuladas.\n"
+        f"Saídas paper: {week['paper_closed_trades']}, PnL líquido simulado {week['paper_net_pnl']:.4f} USDT.\n"
+        f"MFE/MAE médio: {week['paper_avg_mfe_pct'] if week['paper_avg_mfe_pct'] is not None else 'n/d'}% / {week['paper_avg_mae_pct'] if week['paper_avg_mae_pct'] is not None else 'n/d'}%.\n"
         f"Ação: {top_recommendation}\n"
         "Relatório detalhado salvo em logs/daily_review.md. Sem ajuste automático ou ordens."
     )

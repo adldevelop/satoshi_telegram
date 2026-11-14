@@ -151,13 +151,92 @@ async def test_cycle_reuses_account_response_and_tracks_only_simulations_or_fill
     mock_binance_client.get_margin_account.assert_called_once()
     assert len(state["entries"]) == int(entry_expected)
     if entry_expected:
-        expected_price = 1070 / 0.01 if trading_mode == "real" else 107000.0
+        expected_price = 1070 / 0.01 if trading_mode == "real" else state["paper_position"]["entry_price"]
         assert state["entries"][0]["price"] == pytest.approx(expected_price)
     assert saved_states[0]["entries"] == state["entries"]
     assert logged_cycles[0][3] == "Análise determinística: preço 107000.00, zona [106563.60 — 107640.00]."
     assert logged_cycles[0][4] == expected_status
     if trading_mode == "real":
         mock_binance_client.create_margin_order.assert_called_once()
+        assert "paper_position" not in state
     else:
         mock_binance_client.create_margin_order.assert_not_called()
         assert logged_cycles[0][5]["quantity"] == pytest.approx(0.01869)
+        assert state["paper_position"]["status"] == "OPEN"
+
+
+@pytest.mark.parametrize(
+    ("price", "expected_status", "expected_trade_reason"),
+    [
+        (107000.0, "NO_ENTRY", None),
+        (105000.0, "PAPER_EXIT", "STOP_LOSS"),
+    ],
+)
+@pytest.mark.asyncio
+async def test_open_paper_position_blocks_additional_or_same_cycle_entry(
+    tmp_path,
+    monkeypatch,
+    mock_binance_client,
+    price,
+    expected_status,
+    expected_trade_reason,
+):
+    import app.agent as agent_mod
+    from app.paper_trading import open_paper_position
+
+    position = open_paper_position(
+        0.01,
+        107000.0,
+        cycle=0,
+        stop_loss_pct=1,
+        risk_reward=2,
+        fee_pct=0.1,
+        slippage_pct=0.05,
+        timestamp="2026-01-01T00:00:00",
+    )
+    state = {
+        "last_entry_cycle": None,
+        "entries": [],
+        "last_price": None,
+        "paper_position": position,
+        "paper_trades": [],
+    }
+    saved_states = []
+    logged_cycles = []
+    monkeypatch.setattr(agent_mod, "TRADING_MODE", "dry")
+    monkeypatch.setattr(agent_mod, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(agent_mod, "LOG_FILE", str(tmp_path / "logs" / "satoshi_log.jsonl"))
+    monkeypatch.setattr(agent_mod, "PNL_HISTORY_FILE", str(tmp_path / "pnl_history.json"))
+    monkeypatch.setattr(agent_mod, "load_state", lambda: state)
+    monkeypatch.setattr(agent_mod, "save_state", saved_states.append)
+    monkeypatch.setattr(agent_mod, "salvar_log", lambda *args, **kwargs: logged_cycles.append(args))
+    monkeypatch.setattr(agent_mod, "send_telegram_message", lambda _message: None)
+    monkeypatch.setattr(agent_mod, "get_market_data", lambda _symbol: {"price": price})
+    monkeypatch.setattr(
+        agent_mod,
+        "get_fibonacci_levels",
+        lambda _symbol: {"high": 110000, "low": 100000, "retracoes": {"0.382": 105500.0}},
+    )
+    monkeypatch.setattr(agent_mod, "ultima_zona_fibo", None)
+    monkeypatch.setattr(agent_mod, "zona_executada", False)
+    monkeypatch.setattr(agent_mod, "ultimo_preco", None)
+
+    async def cancel_after_cycle(_seconds):
+        raise asyncio.CancelledError
+
+    monkeypatch.setattr(asyncio, "sleep", cancel_after_cycle)
+
+    with pytest.raises(asyncio.CancelledError):
+        await monitorar_mercado(intervalo_segundos=1)
+
+    mock_binance_client.create_margin_order.assert_not_called()
+    assert logged_cycles[0][4] == expected_status
+    if expected_trade_reason is None:
+        assert saved_states[0]["paper_position"]["id"] == position["id"]
+        assert saved_states[0]["paper_trades"] == []
+    else:
+        assert saved_states[0]["paper_position"] is None
+        assert len(saved_states[0]["paper_trades"]) == 1
+        assert saved_states[0]["paper_trades"][0]["reason"] == expected_trade_reason
+        assert logged_cycles[0][5]["paper_trade"]["reason"] == expected_trade_reason
+    assert len(state["entries"]) == 0

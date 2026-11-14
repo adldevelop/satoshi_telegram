@@ -9,8 +9,9 @@ import json
 from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
-from .config import get_buy_percent, get_trading_mode
+from .config import get_buy_percent, get_paper_settings, get_trading_mode
 from .daily_review import run_daily_review_if_due
+from .paper_trading import open_paper_position, process_paper_cycle
 from .tools.get_market_data import get_market_data
 from binance.client import Client
 import requests
@@ -44,6 +45,7 @@ LOG_BACKUP_COUNT = int(os.getenv("LOG_BACKUP_COUNT", "3"))
 #===============================================================
 BUY_PERCENT = get_buy_percent()
 LEVERAGE = int(os.getenv("LEVERAGE", "5"))
+PAPER_SETTINGS = get_paper_settings()
 
 # 🔔 Percentual mínimo de movimento para enviar alerta (ex: 0.5 = 0.5%)
 PRICE_MOVE_ALERT_PCT = float(os.getenv("PRICE_MOVE_ALERT_PCT", "0.5"))
@@ -547,8 +549,29 @@ async def monitorar_mercado(intervalo_segundos=120):
             )
 
             ciclo_status = "NO_ENTRY"
+            paper_exit = None
+            if TRADING_MODE == "dry":
+                state, paper_exit = process_paper_cycle(
+                    state,
+                    preco_atual,
+                    ciclo,
+                    **PAPER_SETTINGS,
+                )
+                if paper_exit is not None:
+                    ciclo_status = "PAPER_EXIT"
+                    extra_payload = {"paper_trade": paper_exit}
+                    print(
+                        f"🧪 [PAPER] Saída {paper_exit['reason']}: "
+                        f"PnL líquido {paper_exit['net_pnl']:.4f} USDT"
+                    )
 
-            if not cooldown_active and (zona_min <= preco_atual <= zona_max) and not zona_executada:
+            if (
+                paper_exit is None
+                and not (TRADING_MODE == "dry" and state.get("paper_position"))
+                and not cooldown_active
+                and (zona_min <= preco_atual <= zona_max)
+                and not zona_executada
+            ):
                 print("🚨 Zona 0.382 atingida — executando ordem MARGIN (5x)...")
                 free_usdt = balances["USDT_free"] if balances else 0
                 qty = calcular_quantidade_compra(
@@ -578,6 +601,22 @@ async def monitorar_mercado(intervalo_segundos=120):
                     print("🧪 [DRY-RUN] Ordem simulada:")
                     print(json.dumps(payload, indent=2))
                     ciclo_status = "SIMULATED_BUY"
+                    paper_position = open_paper_position(
+                        qty,
+                        preco_atual,
+                        ciclo,
+                        **PAPER_SETTINGS,
+                    )
+                    state["paper_position"] = paper_position
+                    payload.update({
+                        "paper_position_id": paper_position["id"],
+                        "entry_fill_price": paper_position["entry_price"],
+                        "stop_price": paper_position["stop_price"],
+                        "take_profit_price": paper_position["take_profit_price"],
+                        "risk_reward": paper_position["risk_reward"],
+                        "fee_pct": paper_position["fee_pct"],
+                        "slippage_pct": paper_position["slippage_pct"],
+                    })
                     extra_payload = payload
 
                     # 🔔 Notificação DRY-RUN
@@ -590,7 +629,8 @@ async def monitorar_mercado(intervalo_segundos=120):
                     )
                     entries.append({
                         "cycle": ciclo,
-                        "price": preco_atual,
+                        "price": paper_position["entry_price"],
+                        "quantity": qty,
                         "timestamp": datetime.now().isoformat(),
                         "mode": "DRY_RUN",
                     })
@@ -637,18 +677,23 @@ async def monitorar_mercado(intervalo_segundos=120):
             salvar_log(
                 ciclo, fibo_data, balances, analise_texto, ciclo_status,
                 extra_payload if ciclo_status != "NO_ENTRY" else None,
-                entries, None,
+                entries,
+                cooldown_meta={
+                    "active": cooldown_active,
+                    "last_entry_cycle": last_entry_cycle,
+                },
                 perf_data={**perf_data, "total_alavancado": total_alavancado},
                 preco_medio=preco_medio,
                 market_price=preco_atual,
             )
 
             # 👉 salva estado com last_price também
-            save_state({
+            state.update({
                 "last_entry_cycle": last_entry_cycle,
                 "entries": entries,
                 "last_price": ultimo_preco,
             })
+            save_state(state)
 
             if entries:
                 print("\n📒 Histórico de Entradas:")
