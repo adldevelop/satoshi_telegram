@@ -127,6 +127,8 @@ async def test_cycle_reuses_account_response_and_tracks_only_simulations_or_fill
     saved_states = []
     logged_cycles = []
     monkeypatch.setattr(agent_mod, "TRADING_MODE", trading_mode)
+    monkeypatch.setattr(agent_mod, "LOG_DIR", str(tmp_path / "logs"))
+    monkeypatch.setattr(agent_mod, "LOG_FILE", str(tmp_path / "logs" / "satoshi_log.jsonl"))
     monkeypatch.setattr(agent_mod, "PNL_HISTORY_FILE", str(tmp_path / "pnl_history.json"))
     monkeypatch.setattr(agent_mod, "load_state", lambda: state)
     monkeypatch.setattr(agent_mod, "save_state", saved_states.append)

@@ -194,6 +194,9 @@ Os testes validam:
 | `logs/satoshi_log.jsonl` | Histórico detalhado de cada ciclo |
 | `logs/pnl_history.json` | Evolução do colateral (30 dias) |
 | `logs/state.json` | Última zona e ciclo de execução |
+| `logs/daily_review.md` | Resumo diário dry-run, erros e acompanhamento hipotético de entradas |
+
+A revisão é gerada uma vez por dia pelo próprio loop do agente e envia um resumo pelo Telegram quando configurado. Ela separa registros `dry` e `real`, não altera parâmetros, e não trata MFE/MAE como lucro realizado; custos, regras de saída e backtest continuam necessários para avaliar rentabilidade.
 
 ---
 

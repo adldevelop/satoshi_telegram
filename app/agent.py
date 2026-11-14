@@ -10,6 +10,7 @@ from decimal import Decimal, ROUND_DOWN
 from typing import Optional, Dict, Any, List
 from datetime import datetime, timedelta
 from .config import get_buy_percent, get_trading_mode
+from .daily_review import run_daily_review_if_due
 from .tools.get_market_data import get_market_data
 from binance.client import Client
 import requests
@@ -119,7 +120,19 @@ def _rotate_log_file(path: str, max_bytes: int, backup_count: int) -> None:
 # 📁 Logger estruturado
 # ==============================================================
 
-def salvar_log(ciclo, fibo_data, balances, analise, status, extra=None, entries=None, cooldown_meta=None, perf_data=None, preco_medio=None):
+def salvar_log(
+    ciclo,
+    fibo_data,
+    balances,
+    analise,
+    status,
+    extra=None,
+    entries=None,
+    cooldown_meta=None,
+    perf_data=None,
+    preco_medio=None,
+    market_price=None,
+):
     _ensure_dirs()
     registro = {
         "timestamp": datetime.now().isoformat(),
@@ -133,6 +146,7 @@ def salvar_log(ciclo, fibo_data, balances, analise, status, extra=None, entries=
         "extra": extra,
         "performance_30d": perf_data,
         "preco_medio_compra": preco_medio,
+        "market_price": market_price,
     }
     if entries is not None:
         registro["entries_count"] = len(entries)
@@ -429,6 +443,7 @@ async def monitorar_mercado(intervalo_segundos=120):
     while True:
         inicio = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         print(f"⏱️ Ciclo {ciclo} iniciado em {inicio}")
+        preco_atual = None
 
         try:
             market = get_market_data("BTCUSDT")
@@ -624,7 +639,8 @@ async def monitorar_mercado(intervalo_segundos=120):
                 extra_payload if ciclo_status != "NO_ENTRY" else None,
                 entries, None,
                 perf_data={**perf_data, "total_alavancado": total_alavancado},
-                preco_medio=preco_medio
+                preco_medio=preco_medio,
+                market_price=preco_atual,
             )
 
             # 👉 salva estado com last_price também
@@ -643,13 +659,33 @@ async def monitorar_mercado(intervalo_segundos=120):
 
         except Exception as e:
             print(f"⚠️ Erro no ciclo: {e}")
-            salvar_log(ciclo, None, None, "ERROR", "ERROR", {"error": str(e)}, entries)
+            salvar_log(
+                ciclo,
+                None,
+                None,
+                "ERROR",
+                "ERROR",
+                {"error": str(e)},
+                entries,
+                market_price=preco_atual,
+            )
 
             # 🔔 Notificação de erro
             send_telegram_message(
                 f"⚠️ ERRO no Satoshi Agent (ciclo {ciclo})\n"
                 f"Detalhe: {e}"
             )
+
+        try:
+            run_daily_review_if_due(
+                log_path=LOG_FILE,
+                output_path=os.path.join(LOG_DIR, "daily_review.md"),
+                state_path=os.path.join(LOG_DIR, "daily_review_state.json"),
+                current_mode=TRADING_MODE,
+                notifier=send_telegram_message,
+            )
+        except Exception as review_error:
+            print(f"⚠️ Falha na revisão diária: {type(review_error).__name__}")
 
         tempo = (time.time() - start_time) / 60
         print(f"\n🕒 Aguardando {intervalo_segundos/60:.0f} minutos... | Tempo total: {tempo:.1f} min\n")

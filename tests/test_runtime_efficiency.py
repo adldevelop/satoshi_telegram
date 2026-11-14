@@ -7,6 +7,7 @@ from app.agent import (
     _rotate_log_file,
     get_balances_margin,
     get_margin_performance_30d,
+    salvar_log,
 )
 
 
@@ -51,6 +52,20 @@ def test_rotate_log_file_keeps_only_configured_backups(tmp_path):
 
     assert not log_path.exists()
     assert (tmp_path / "agent.jsonl.1").read_text() == "current log is large"
+
+
+def test_log_records_structured_market_price(tmp_path, monkeypatch):
+    import app.agent as agent_mod
+
+    log_path = tmp_path / "satoshi_log.jsonl"
+    monkeypatch.setattr(agent_mod, "LOG_DIR", str(tmp_path))
+    monkeypatch.setattr(agent_mod, "LOG_FILE", str(log_path))
+    monkeypatch.setattr(agent_mod, "LOG_MAX_BYTES", 0)
+
+    salvar_log(1, {}, {}, "analysis", "NO_ENTRY", market_price=123.45)
+
+    row = json.loads(log_path.read_text(encoding="utf-8"))
+    assert row["market_price"] == 123.45
 
 
 def test_market_data_reuses_binance_client(monkeypatch):
