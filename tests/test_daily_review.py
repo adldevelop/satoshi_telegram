@@ -83,15 +83,50 @@ def test_daily_review_writes_once_per_date_and_notifies(tmp_path):
         str(state_path),
         current_mode="dry",
         notifier=messages.append,
+        now=now + timedelta(minutes=30),
+    )
+    refreshed = run_daily_review_if_due(
+        str(log_path),
+        str(output_path),
+        str(state_path),
+        current_mode="dry",
+        notifier=messages.append,
         now=now + timedelta(hours=1),
     )
 
     assert first is not None
     assert second is None
+    assert refreshed is not None
     assert output_path.exists()
     assert json.loads(state_path.read_text(encoding="utf-8"))["last_review_date"] == "2026-01-10"
     assert len(messages) == 1
     assert "revisão diária dry-run" in messages[0]
+    assert "Saídas paper em 7d: nenhuma; PnL não disponível." in output_path.read_text(encoding="utf-8")
+
+
+def test_new_day_notifies_even_if_report_was_recently_refreshed(tmp_path):
+    log_path = tmp_path / "satoshi_log.jsonl"
+    output_path = tmp_path / "daily_review.md"
+    state_path = tmp_path / "daily_review_state.json"
+    now = datetime(2026, 1, 10, 23, 45)
+    log_path.write_text(json.dumps(_row(now)) + "\n", encoding="utf-8")
+    messages = []
+
+    run_daily_review_if_due(
+        str(log_path), str(output_path), str(state_path), "dry", messages.append, now=now
+    )
+    next_day = run_daily_review_if_due(
+        str(log_path),
+        str(output_path),
+        str(state_path),
+        "dry",
+        messages.append,
+        now=now + timedelta(minutes=15),
+    )
+
+    assert next_day is not None
+    assert len(messages) == 2
+    assert json.loads(state_path.read_text(encoding="utf-8"))["last_notification_date"] == "2026-01-11"
 
 
 def test_review_aggregates_only_closed_paper_trade_results():

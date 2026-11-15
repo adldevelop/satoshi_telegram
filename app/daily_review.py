@@ -1,4 +1,5 @@
 import json
+import math
 import os
 import re
 from collections import Counter, deque
@@ -97,20 +98,24 @@ def _window_summary(rows: Iterable[Dict[str, Any]]) -> Dict[str, Any]:
         for row in dry_rows
         if row.get("status") == "PAPER_EXIT" and isinstance(row.get("extra"), dict)
     ]
-    paper_pnls = [
-        float(trade["net_pnl"])
-        for trade in paper_trades
-        if isinstance(trade, dict) and isinstance(trade.get("net_pnl"), (int, float))
-    ]
+    paper_pnls = []
+    for trade in paper_trades:
+        value = trade.get("net_pnl") if isinstance(trade, dict) else None
+        if isinstance(value, (int, float)) and math.isfinite(float(value)):
+            paper_pnls.append(float(value))
     paper_mfe = [
         float(trade["max_favorable_excursion_pct"])
         for trade in paper_trades
-        if isinstance(trade, dict) and isinstance(trade.get("max_favorable_excursion_pct"), (int, float))
+        if isinstance(trade, dict)
+        and isinstance(trade.get("max_favorable_excursion_pct"), (int, float))
+        and math.isfinite(float(trade["max_favorable_excursion_pct"]))
     ]
     paper_mae = [
         float(trade["max_adverse_excursion_pct"])
         for trade in paper_trades
-        if isinstance(trade, dict) and isinstance(trade.get("max_adverse_excursion_pct"), (int, float))
+        if isinstance(trade, dict)
+        and isinstance(trade.get("max_adverse_excursion_pct"), (int, float))
+        and math.isfinite(float(trade["max_adverse_excursion_pct"]))
     ]
     return {
         "rows": len(selected),
@@ -212,6 +217,7 @@ def build_review(
 
     return {
         "generated_at": now.isoformat(),
+        "data_through": max((row["_parsed_at"] for row in rows), default=None),
         "current_mode": current_mode,
         "last_24h": dry_24h,
         "last_7d": dry_7d,
@@ -227,6 +233,7 @@ def render_report(review: Dict[str, Any]) -> str:
     day = review["last_24h"]
     week = review["last_7d"]
     followup = review["paper_followup_24h"]
+    data_through = review.get("data_through")
     errors = ", ".join(
         f"{name}: {count}" for name, count in sorted(day["dry_error_categories"].items())
     ) or "nenhuma"
@@ -243,9 +250,15 @@ def render_report(review: Dict[str, Any]) -> str:
         f"# Revisão automática do dry-run ({today})",
         "",
         f"Modo atual: **{review['current_mode']}**",
+        f"Dados até: {data_through.isoformat() if isinstance(data_through, datetime) else 'sem registros válidos'}",
         f"Últimas 24h: {day['dry_cycles']} ciclos dry, {day['dry_entries']} entrada(s) simulada(s), {day['dry_errors']} erro(s).",
         f"Últimos 7 dias: {week['dry_cycles']} ciclos dry, {week['dry_entries']} entrada(s) simulada(s), {week['dry_errors']} erro(s).",
-        f"Saídas paper em 7d: {week['paper_closed_trades']}, resultado líquido simulado {week['paper_net_pnl']:.4f} USDT (antes de juros/custos não modelados).",
+        (
+            f"Saídas paper em 7d: {week['paper_closed_trades']}, resultado líquido simulado "
+            f"{week['paper_net_pnl']:.4f} USDT (antes de juros/custos não modelados)."
+            if week["paper_closed_trades"]
+            else "Saídas paper em 7d: nenhuma; PnL não disponível."
+        ),
         f"MFE/MAE médios das saídas paper em 7d: {week['paper_avg_mfe_pct'] if week['paper_avg_mfe_pct'] is not None else 'n/d'}% / {week['paper_avg_mae_pct'] if week['paper_avg_mae_pct'] is not None else 'n/d'}%.",
         f"Categorias de erro nas últimas 24h: {errors}.",
         f"Acompanhamento hipotético de entradas dry: {mark_to_market}.",
@@ -266,11 +279,16 @@ def telegram_summary(review: Dict[str, Any]) -> str:
     day = review["last_24h"]
     week = review["last_7d"]
     top_recommendation = review["recommendations"][0] if review["recommendations"] else "Sem alertas operacionais."
+    closed_trade_summary = (
+        f"Saídas paper: {week['paper_closed_trades']}, PnL líquido simulado {week['paper_net_pnl']:.4f} USDT.\n"
+        if week["paper_closed_trades"]
+        else "Saídas paper: nenhuma; PnL não disponível.\n"
+    )
     return (
         "Satoshi: revisão diária dry-run\n"
         f"24h: {day['dry_cycles']} ciclos, {day['dry_entries']} entradas simuladas, {day['dry_errors']} erros.\n"
         f"7d: {week['dry_cycles']} ciclos, {week['dry_entries']} entradas simuladas.\n"
-        f"Saídas paper: {week['paper_closed_trades']}, PnL líquido simulado {week['paper_net_pnl']:.4f} USDT.\n"
+        f"{closed_trade_summary}"
         f"MFE/MAE médio: {week['paper_avg_mfe_pct'] if week['paper_avg_mfe_pct'] is not None else 'n/d'}% / {week['paper_avg_mae_pct'] if week['paper_avg_mae_pct'] is not None else 'n/d'}%.\n"
         f"Ação: {top_recommendation}\n"
         "Relatório detalhado salvo em logs/daily_review.md. Sem ajuste automático ou ordens."
@@ -291,21 +309,37 @@ def run_daily_review_if_due(
     current_mode: str,
     notifier: Optional[Callable[[str], None]] = None,
     now: Optional[datetime] = None,
+    refresh_interval: timedelta = timedelta(hours=1),
 ) -> Optional[Dict[str, Any]]:
     now = now or datetime.now()
+    if now.tzinfo is not None:
+        now = now.astimezone().replace(tzinfo=None)
     review_date = now.date().isoformat()
     state_file = Path(state_path)
     try:
         state = json.loads(state_file.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
         state = {}
-    if state.get("last_review_date") == review_date:
+    last_report_at = _parse_timestamp(state.get("last_report_at"))
+    report_is_fresh = (
+        last_report_at is not None
+        and timedelta(0) <= now - last_report_at < refresh_interval
+        and Path(output_path).is_file()
+    )
+    should_notify = notifier is not None and state.get("last_notification_date") != review_date
+    if report_is_fresh and not should_notify:
         return None
 
     review = build_review(load_log_rows(log_path), current_mode=current_mode, now=now)
     _atomic_write(Path(output_path), render_report(review))
-    _atomic_write(state_file, json.dumps({"last_review_date": review_date}, indent=2) + "\n")
-    if notifier is not None:
+    state.update({
+        "last_review_date": review_date,
+        "last_report_at": now.isoformat(),
+    })
+    if should_notify:
+        state["last_notification_date"] = review_date
+    _atomic_write(state_file, json.dumps(state, indent=2) + "\n")
+    if should_notify and notifier is not None:
         notifier(telegram_summary(review))
     return review
 
