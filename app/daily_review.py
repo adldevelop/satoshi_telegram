@@ -326,7 +326,11 @@ def run_daily_review_if_due(
         and timedelta(0) <= now - last_report_at < refresh_interval
         and Path(output_path).is_file()
     )
-    should_notify = notifier is not None and state.get("last_notification_date") != review_date
+    last_notification_date = state.get(
+        "last_notification_date",
+        state.get("last_review_date"),
+    )
+    should_notify = notifier is not None and last_notification_date != review_date
     if report_is_fresh and not should_notify:
         return None
 
